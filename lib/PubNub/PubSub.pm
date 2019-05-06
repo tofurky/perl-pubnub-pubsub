@@ -181,16 +181,17 @@ u - Object - User Metadata
            unless (scalar(keys %channels)) { # on connect messages
               goto $cb_dispatch->{on_connect}
                    if exists $cb_dispatch->{on_connect};
+              sleep 1; # wink's "pubnub" is buggy. workaround it....
               return 1;
            }
 
            foreach my $channel (keys %channels) {
+               @_ = ([$channels{$channel}, $timestamp, $channel]);
                if (exists $cb_dispatch->{$channel}) {
                    # these are verified coderefs, so replacing the current stack 
                    # frame with a call to the function.  They will *not* jump to 
                    # a label or other points.  Basically this just lets us pretend
                    # that this was called directly by subscribe above.
-                   @_ = ($channels{$channel}, $timestamp, $channel);
                    goto $cb_dispatch->{$channel};
                } elsif (exists $cb_dispatch->{'_default'}) {
                    goto $cb_dispatch->{_default};

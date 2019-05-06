@@ -100,8 +100,8 @@ sub subscribe { ## no critic (RequireArgUnpacking)
 
     my $ua = $self->__ua;
 
-    my $tx = $ua->get($self->{web_host} . "/subscribe/$sub_key/$channel/0/$timetoken");
-    unless ($tx->success) {
+    my $tx = $ua->get($self->{web_host} . "/v2/subscribe/$sub_key/$channel/0?tt=$timetoken");
+    if ($tx->error) {
         # for example $tx->error->{message} =~ /Inactivity timeout/
 
         # This is not a traditional goto. Instead it exits this function 
@@ -114,12 +114,11 @@ sub subscribe { ## no critic (RequireArgUnpacking)
         goto &subscribe;
     }
     my $json = $tx->res->json;
-    my @cb_args = $params{raw_msg}? ($json) : (@{$json->[0]});
 
-    my $rtn = $callback ? $callback->(@cb_args) : 1;
+    my $rtn = $callback ? $callback->($json) : 1;
     return unless $rtn;
 
-    $timetoken = $json->[1];
+    $timetoken = $json->{t}->{t};
     @_ = ($self, %params, timetoken => $timetoken);
     goto &subscribe;
 }
@@ -138,31 +137,72 @@ sub subscribe_multi { ## no critic (RequireArgUnpacking)
            croak "Non-coderef value found for callback key $_" 
                 unless ref($params{callback}->{$_}) =~ /CODE/;
        }
+=pod
+Successful responses (200) return a three-element array:
+
+Array Element 0 - Array - An array consisting of messages.
+
+Array Element 1 - String - The next timetoken to connect with.
+
+Array Element 2 - String - A CSV (not array) of the channels associated, in order, with the messages in array element 0. If the is an empty heartbeat response, or an empty initial timetoken 0 response, or you are only subscribed to a single channel or channel group, this element will not be returned.
+
+Array Element 3 - String -When subscribed to one or more channel groups, array element 3 appears. It is a CSV (not array) of the "real channel" name associated with the channel group name.
+=cut
+=pod
+An Object containing 2 elements:
+
+First element is an object containing 2 values: t - String - the timetoken and r - Int - the region.
+
+Second element is an array of messages, each message contains.
+
+a - String - Shard
+b - String - Subscription match or the channel group
+c - String - Channel
+d - Object - The payload
+f - Int - Flags
+i - String - Issuing Client Id
+k - String - Subscribe Key
+o - Object - Originating Timetoken, containing: t - String - the timetoken and r - Int - the region.
+p - Object - Publish Timetoken Metadata containing: t - String - the timetoken and r - Int - the region.
+u - Object - User Metadata
+=cut
        $callback = sub {
-           my ($obj) = @_;
-           my (undef, undef, $channel) = @$obj;
+           my $response = shift;
+           my $timestamp = $response->{t}->{t};
+           my %channels = ();
+           foreach my $message (@{$response->{m}}) {
+               my ($channel, $data) = ($message->{c}, $message->{d});
+               next if(!defined($channel));
+               $channels{$channel} = [] if(!exists($channels{$channel}));
+               push(@{$channels{$channel}}, $data);
+           }
+
            my $cb_dispatch = $params{callback};
-           unless ($channel) { # on connect messages
+           unless (scalar(keys %channels)) { # on connect messages
               goto $cb_dispatch->{on_connect}
                    if exists $cb_dispatch->{on_connect};
               return 1;
            }
-           if (exists $cb_dispatch->{$channel}){
 
-              # these are verified coderefs, so replacing the current stack 
-              # frame with a call to the function.  They will *not* jump to 
-              # a label or other points.  Basically this just lets us pretend
-              # that this was called directly by subscribe above.
-              goto $cb_dispatch->{$channel};
-           } elsif (exists $cb_dispatch->{'_default'}){
-              goto $cb_dispatch->{_default};
-           } else {
-              warn 'Using callback dispatch table, cannot find channel callback'
-                   . ' and _default callback not specified';
-              return;
+           foreach my $channel (keys %channels) {
+               if (exists $cb_dispatch->{$channel}) {
+                   # these are verified coderefs, so replacing the current stack 
+                   # frame with a call to the function.  They will *not* jump to 
+                   # a label or other points.  Basically this just lets us pretend
+                   # that this was called directly by subscribe above.
+                   @_ = ($channels{$channel}, $timestamp, $channel);
+                   goto $cb_dispatch->{$channel};
+               } elsif (exists $cb_dispatch->{'_default'}) {
+                   goto $cb_dispatch->{_default};
+               } else {
+                   warn 'Using callback dispatch table, cannot find channel callback'
+                        . ' and _default callback not specified';
+                   return;
+               }
            }
        };
     }
+
     $callback = $params{callback} unless ref $callback;
 
     my $channel_string = join ',', @{$params{channels}};
